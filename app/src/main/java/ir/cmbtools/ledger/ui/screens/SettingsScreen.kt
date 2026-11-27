@@ -1,0 +1,1055 @@
+package ir.cmbtools.ledger.ui.screens
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavHostController
+import ir.cmbtools.ledger.BuildConfig
+import ir.cmbtools.ledger.core.AppSettings
+import ir.cmbtools.ledger.core.BackgroundExecutionAccess
+import ir.cmbtools.ledger.core.Jalali
+import ir.cmbtools.ledger.core.Money
+import ir.cmbtools.ledger.core.SmsGatewayProvider
+import ir.cmbtools.ledger.core.SmsMode
+import ir.cmbtools.ledger.export.DriveBackupWorker
+import ir.cmbtools.ledger.export.ExportManager
+import ir.cmbtools.ledger.panel.PanelUrl
+import ir.cmbtools.ledger.ui.AppViewModel
+import ir.cmbtools.ledger.ui.common.AmountField
+import ir.cmbtools.ledger.ui.common.DropdownField
+import ir.cmbtools.ledger.ui.common.GradientHeader
+import ir.cmbtools.ledger.ui.common.LabeledField
+import ir.cmbtools.ledger.ui.common.SectionCard
+import ir.cmbtools.ledger.ui.theme.AccentGreen
+import ir.cmbtools.ledger.ui.theme.PrimaryCyan
+import ir.cmbtools.ledger.ui.theme.TextMuted
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.text.DateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.roundToInt
+
+@Composable
+fun SettingsScreen(vm: AppViewModel, nav: NavHostController) {
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val config by vm.panelConfig.collectAsStateWithLifecycle()
+    val panelStatus by vm.panelStatus.collectAsStateWithLifecycle()
+    val panelChecks by vm.panelChecks.collectAsStateWithLifecycle()
+    val accounts by vm.panelAccounts.collectAsStateWithLifecycle()
+    val panelEndpoints by vm.panelEndpoints.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val driveBackupPrefs = remember { vm.appContainer().prefs }
+    var driveBackupFolder by remember { mutableStateOf(driveBackupPrefs.driveBackupFolderUri()) }
+    var driveBackupEnabled by remember { mutableStateOf(driveBackupPrefs.isDriveBackupEnabled()) }
+    var driveBackupLastSuccess by remember { mutableStateOf(driveBackupPrefs.driveBackupLastSuccessMillis()) }
+    var driveBackupLastError by remember { mutableStateOf(driveBackupPrefs.driveBackupLastError()) }
+
+    val driveFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            runCatching {
+                val accessFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, accessFlags)
+                val folder = DocumentFile.fromTreeUri(context, uri)
+                check(folder != null && folder.isDirectory && folder.canWrite()) {
+                    "این پوشه برای نوشتن پشتیبان قابل استفاده نیست"
+                }
+                driveBackupPrefs.setDriveBackupFolderUri(uri.toString())
+                driveBackupPrefs.setDriveBackupEnabled(true)
+                driveBackupFolder = uri.toString()
+                driveBackupEnabled = true
+                driveBackupLastError = null
+                DriveBackupWorker.enable(context)
+                vm.report("پوشه انتخاب شد؛ اولین پشتیبان‌گیری پس از اتصال به اینترنت انجام می‌شود")
+            }.onFailure {
+                vm.report("انتخاب پوشه ناموفق بود: ${it.message ?: "مجوز نوشتن داده نشد"}", isError = true)
+            }
+        }
+    }
+
+    val sendSmsPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.updateSettings { it.copy(smsMode = SmsMode.SIM) }
+        else vm.report("مجوز ارسال پیامک داده نشد؛ روش درگاه پیامکی فعال می‌ماند", isError = true)
+    }
+    val receiveSmsPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.report(
+            if (granted) "مجوز دریافت پیامک فعال شد"
+            else "مجوز دریافت پیامک داده نشد؛ فرمان‌های ایجاد و تمدید پیامکی کار نخواهند کرد",
+            isError = !granted
+        )
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.setAutoSyncEnabled(true)
+        if (!granted) vm.report("همگام‌سازی روشن شد؛ اما اعلان‌های آن در تنظیمات اندروید خاموش است")
+    }
+    var backgroundAccessGranted by remember { mutableStateOf(BackgroundExecutionAccess.isExempt(context)) }
+    val backgroundAccessLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        backgroundAccessGranted = BackgroundExecutionAccess.isExempt(context)
+        vm.report(
+            if (backgroundAccessGranted) "اجازهٔ اجرای پس‌زمینه فعال شد"
+            else "اجازهٔ اجرای پس‌زمینه داده نشد؛ ممکن است همگام‌سازی با تأخیر انجام شود",
+            isError = !backgroundAccessGranted
+        )
+    }
+
+    // سه فیلد مستقل و صریح (بازطراحی ۰.۳.۱):
+    //   آدرس کامل پنل  ← همان آدرس مرورگر (مسیر ادمین از آن استخراج می‌شود)
+    //   کلید API      ← UUID ادمین
+    //   پایهٔ لینک اشتراک ← آدرس جدا برای کانفیگ مشتری (خالی = خودکار از پنل)
+    var panelUrl by remember { mutableStateOf(config?.panelUrl ?: "") }
+    var apiKey by remember { mutableStateOf(config?.apiKey ?: "") }
+    var subBase by remember { mutableStateOf(config?.subscriptionBase ?: "") }
+    var panelName by remember { mutableStateOf(config?.name ?: "پنل اصلی") }
+    var showEndpoints by remember { mutableStateOf(true) }
+
+    var businessName by remember { mutableStateOf(settings.businessName) }
+    var footer by remember { mutableStateOf(settings.invoiceFooter) }
+    var template by remember { mutableStateOf(settings.invoiceTemplate) }
+    var gatewayKey by remember { mutableStateOf(settings.gatewayApiKey) }
+    var gatewaySender by remember { mutableStateOf(settings.gatewaySender) }
+    var renewalCommandSender by remember { mutableStateOf(settings.renewalCommandSender) }
+    var autoMatchMax by remember { mutableStateOf(settings.autoMatchMaxRial) }
+    var cardNumber by remember { mutableStateOf(settings.paymentCardNumber) }
+    var pricePerGb by remember { mutableStateOf(settings.pricePerGbRial) }
+    var pin by remember { mutableStateOf("") }
+
+    // هر گروه تنظیمات سربرگ (تب) جداگانه دارد تا صفحه شلوغ و تو‌در‌تو نباشد.
+    var tab by remember { mutableStateOf(0) }
+
+    LaunchedEffect(tab) {
+        if (tab == SettingsTab.BACKUP.ordinal) {
+            while (isActive) {
+                driveBackupEnabled = driveBackupPrefs.isDriveBackupEnabled()
+                driveBackupFolder = driveBackupPrefs.driveBackupFolderUri()
+                driveBackupLastSuccess = driveBackupPrefs.driveBackupLastSuccessMillis()
+                driveBackupLastError = driveBackupPrefs.driveBackupLastError()
+                delay(3_000)
+            }
+        }
+    }
+
+    LaunchedEffect(config) {
+        config?.let {
+            panelUrl = it.panelUrl
+            apiKey = it.apiKey
+            subBase = it.subscriptionBase
+            panelName = it.name
+            vm.refreshPanelEndpoints()
+        }
+    }
+
+    val scope = rememberCoroutineScope()
+    val saveBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            ExportManager(context, vm.appContainer()).saveBackup(uri) { result ->
+                result.onSuccess { vm.report("فایل پشتیبان در دستگاه ذخیره شد") }
+                    .onFailure { vm.report("ذخیرهٔ پشتیبان ناموفق: ${it.message}", isError = true) }
+            }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                ExportManager(context, vm.appContainer()).importBackup(uri)
+                    .onSuccess {
+                        vm.report(
+                            "بازیابی کامل شد: " + Money.toPersian(it.customers.size.toString()) + " مشتری" +
+                                (if (it.settings != null) " + تنظیمات" else " (فایل قدیمی، بدون تنظیمات)") +
+                                (if (it.panelConfig != null) " + اتصال پنل" else "")
+                        )
+                    }
+                    .onFailure { vm.report("بازیابی ناموفق: ${it.message}", isError = true) }
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        GradientHeader(
+            title = "تنظیمات",
+            subtitle = "هر گروه تنظیمات، سربرگ جداگانه دارد"
+        )
+
+        ScrollableTabRow(
+            selectedTabIndex = tab,
+            edgePadding = 6.dp,
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = PrimaryCyan
+        ) {
+            SettingsTab.entries.forEachIndexed { index, item ->
+                Tab(
+                    selected = tab == index,
+                    onClick = { tab = index },
+                    text = {
+                        Text(
+                            item.title,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (tab == index) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // ─────────────────────────────────────────────────────────────
+            // اتصال پنل — بازطراحی کامل فیلدها (نسخهٔ ۰.۳.۱)
+            // سه چیز که در هیدی‌فای از سه جای متفاوت می‌آید، اینجا سه فیلد جدا دارند:
+            //   ۱) آدرس پنل (همان آدرس مرورگر) → مسیر ادمین و آدرس ساخت کاربر از آن ساخته می‌شود
+            //   ۲) کلید API (UUID ادمین)
+            //   ۳) پایهٔ لینک اشتراک (مستقل از مسیر ادمین)
+            // ─────────────────────────────────────────────────────────────
+            SectionCard(title = "اتصال به پنل هیدی‌فای", visible = tab == SettingsTab.PANEL.ordinal) {
+                Text(
+                    "برای اینکه ساخت کاربر و لینک اشتراک درست کار کند، این سه مورد را پر کنید. " +
+                        "اپ با نسخه‌های ۱۱ تا ۱۴ پنل هیدی‌فای کار می‌کند و مسیر/سبک درست را خودش پیدا می‌کند؛ " +
+                        "نتیجهٔ جستجو را پایین همین کارت می‌بینید.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(10.dp))
+
+                LabeledField(
+                    "۱) آدرس پنل (همان که در مرورگر باز می‌کنید)",
+                    panelUrl,
+                    { panelUrl = it },
+                    placeholder = "https://panel.example.com/AbCdEf12"
+                )
+                Text(
+                    "آدرس را از نوار آدرس مرورگر کپی کنید؛ اگر پنل را با /admin یا با لینک API باز کرده‌اید، " +
+                        "همان را بچسبانید — اپ مسیر پروکسی ادمین را خودش جدا می‌کند.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+
+                Spacer(Modifier.height(10.dp))
+                LabeledField(
+                    "۲) کلید API (UUID ادمین)",
+                    apiKey,
+                    { apiKey = it },
+                    placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                )
+                Text(
+                    "در پنل: «ادمین‌ها» → ردیف حساب خودتان → کلید API. این کلید در هدر Hiddify-API-Key فرستاده می‌شود.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+
+                Spacer(Modifier.height(10.dp))
+                LabeledField(
+                    "۳) پایهٔ لینک اشتراک مشتری (اختیاری)",
+                    subBase,
+                    { subBase = it },
+                    placeholder = "https://panel.example.com/x7Yz12/"
+                )
+                Text(
+                    "این آدرس با «آدرس پنل» فرق دارد و در هیدی‌فای از proxy_path_client ساخته می‌شود. " +
+                        "اگر خالی بگذارید، بعد از تست اتصال خودکار از خود پنل خوانده می‌شود؛ " +
+                        "لینک هر مشتری = همین آدرس + شناسهٔ کاربر + /",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = { subBase = "" }) { Text("خالی کردن (خودکار از پنل)") }
+                    if (subBase.isBlank()) {
+                        TextButton(onClick = { vm.testPanel() }) { Text("خواندن از پنل الان") }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                LabeledField("نام پنل (برای خودتان)", panelName, { panelName = it })
+
+                Spacer(Modifier.height(10.dp))
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val narrow = maxWidth < 360.dp
+                    if (narrow) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { vm.savePanelConfig(panelUrl, apiKey, subBase, panelName) { vm.testPanel() } },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("ذخیره و تست اتصال") }
+                            OutlinedButton(onClick = { vm.probePanelCreate() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("تست ساخت کاربر در پنل")
+                            }
+                            OutlinedButton(onClick = { vm.scanPanel() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("جستجوی خودکار مسیر (نسخه ۱۱ تا ۱۴)")
+                            }
+                            OutlinedButton(onClick = { vm.diagnosePanel() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("عیب‌یابی کامل")
+                            }
+                            OutlinedButton(onClick = { vm.syncPanel() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("همگام‌سازی الان")
+                            }
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { vm.savePanelConfig(panelUrl, apiKey, subBase, panelName) { vm.testPanel() } },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("ذخیره و تست") }
+                                OutlinedButton(onClick = { vm.probePanelCreate() }, modifier = Modifier.weight(1f)) {
+                                    Text("تست ساخت کاربر")
+                                }
+                            }
+                            OutlinedButton(onClick = { vm.scanPanel() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("جستجوی خودکار مسیر و نسخه")
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = { vm.diagnosePanel() }, modifier = Modifier.weight(1f)) {
+                                    Text("عیب‌یابی")
+                                }
+                                OutlinedButton(onClick = { vm.syncPanel() }, modifier = Modifier.weight(1f)) {
+                                    Text("همگام‌سازی")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (panelStatus.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(panelStatus, color = PrimaryCyan, style = MaterialTheme.typography.labelMedium)
+                }
+
+                // ── آدرس‌های دقیق: چیزی پنهان نماند ──
+                Spacer(Modifier.height(10.dp))
+                TextButton(onClick = { showEndpoints = !showEndpoints }) {
+                    Text(if (showEndpoints) "بستن آدرس‌های دقیق ▲" else "دیدن آدرس‌های دقیق ▼")
+                }
+                if (showEndpoints) {
+                    // همین حالا و از همان چیزی که در فیلدهاست محاسبه می‌شود تا کاربر
+                    // قبل از ذخیره هم ببیند دقیقاً چه آدرسی فرستاده می‌شود.
+                    val parts = PanelUrl.normalize(panelUrl, "")
+                    val api = if (parts.proxyPath.isBlank()) "" else parts.panelUrl + "/api/v2/"
+                    val linkBase = PanelUrl.normalizeLinkBase(subBase)
+                        .ifBlank { panelEndpoints.subscriptionBase }
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        EndpointLine("آدرس پنل", if (parts.host.isBlank()) "—" else parts.panelUrl)
+                        EndpointLine(
+                            "مسیر پروکسی ادمین",
+                            parts.proxyPath.ifBlank { "— (از آدرس پنل پیدا نشد)" }
+                        )
+                        EndpointLine("سبک API تشخیص‌داده‌شده", panelEndpoints.flavor.ifBlank { "خودکار" })
+                        EndpointLine("نسخهٔ پنل", panelEndpoints.version.ifBlank { "?" })
+                        EndpointLine("پایهٔ API", api.ifBlank { "—" })
+                        // مسیر فعال همان است که اپ واقعاً استفاده می‌کند (بر اساس نسخهٔ تشخیص‌داده‌شده)
+                        EndpointLine(
+                            "ساخت کاربر (POST) — مسیر فعال",
+                            panelEndpoints.createUserUrl.ifBlank {
+                                if (api.isBlank()) "—" else api + "admin/users/"
+                            }
+                        )
+                        EndpointLine(
+                            "مسیرهای جایگزین (اگر نسخهٔ قدیمی باشد)",
+                            if (api.isBlank()) "—" else api + "admin/user/  •  " + api + "v1/user/"
+                        )
+                        EndpointLine(
+                            "پایهٔ لینک اشتراک",
+                            linkBase.ifBlank { "— (بعد از تست، خودکار از پنل پر می‌شود)" }
+                        )
+                        if (linkBase.isNotBlank()) {
+                            EndpointLine(
+                                "نمونهٔ لینک مشتری",
+                                linkBase + "00000000-0000-0000-0000-000000000000/"
+                            )
+                        }
+                    }
+                }
+
+                if (panelChecks.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("نتیجهٔ بررسی:", style = MaterialTheme.typography.labelLarge)
+                    panelChecks.forEach { check ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Text(
+                                when {
+                                    check.ok -> "✅"
+                                    check.note -> "▫️"   // «در این نسخه وجود ندارد» — خطا نیست
+                                    else -> "❌"
+                                },
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Column {
+                                Text(check.title, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    check.detail,
+                                    color = if (check.ok || check.note) TextMuted else MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedButton(onClick = { vm.copyPanelReport() }, modifier = Modifier.fillMaxWidth()) {
+                        Text("کپی گزارش برای ارسال")
+                    }
+                }
+
+                if (config?.panelVersion?.isNotBlank() == true) {
+                    Text(
+                        "نسخهٔ پنل: " + Money.toPersian(config?.panelVersion ?: ""),
+                        color = TextMuted, style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                Text(
+                    "اکانت‌های همگام‌شده: " + Money.toPersian(accounts.size.toString()),
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+
+            SectionCard(title = "همگام‌سازی و فاکتور خودکار", visible = tab == SettingsTab.SYNC.ordinal) {
+                Text(
+                    if (backgroundAccessGranted) "اجازهٔ محدودیت‌نداشتن از بهینه‌سازی باتری فعال است"
+                    else "برای کمتر متوقف‌شدن همگام‌سازی هنگام خاموش‌بودن صفحه، اجازهٔ فعالیت پس‌زمینه را فعال کنید",
+                    color = if (backgroundAccessGranted) AccentGreen else TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                if (!backgroundAccessGranted) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            val intent = BackgroundExecutionAccess.requestIntent(context)
+                                ?: BackgroundExecutionAccess.settingsIntent()
+                            runCatching { backgroundAccessLauncher.launch(intent) }
+                                .onFailure { vm.report("بازکردن تنظیمات اجرای پس‌زمینه ممکن نشد", isError = true) }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("درخواست اجازهٔ اجرای پس‌زمینه") }
+                    Text(
+                        "تأیید این اجازه را خود اندروید می‌گیرد؛ در بعضی گوشی‌ها باید تنظیم شروع خودکار برنامه را هم جداگانه روشن کنید.",
+                        color = TextMuted,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("همگام‌سازی خودکار با پنل")
+                        Text(
+                            "کاربران جدید در چرخهٔ بعدی شناسایی می‌شوند؛ پشتیبان اندروید هر ۱۵ دقیقه هم تلاش می‌کند",
+                            color = TextMuted,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    Switch(
+                        checked = settings.autoSyncEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled && Build.VERSION.SDK_INT >= 33 &&
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else vm.setAutoSyncEnabled(enabled)
+                        }
+                    )
+                }
+                Text(
+                    "فاصلهٔ بررسی: ${Money.toPersian(settings.autoSyncMinutes.coerceIn(1, 15).toString())} دقیقه (۱ دقیقه سریع‌تر است؛ بدون وب‌هوکِ پنل، تشخیص کاملاً لحظه‌ای ممکن نیست)",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Slider(
+                    value = settings.autoSyncMinutes.coerceIn(1, 15).toFloat(),
+                    onValueChange = { value ->
+                        val minutes = value.roundToInt().coerceIn(1, 15)
+                        if (minutes != settings.autoSyncMinutes) {
+                            vm.updateSettings { it.copy(autoSyncMinutes = minutes) }
+                        }
+                    },
+                    valueRange = 1f..15f,
+                    steps = 13,
+                    enabled = settings.autoSyncEnabled
+                )
+                if (settings.autoSyncEnabled && Build.VERSION.SDK_INT >= 33 &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    TextButton(onClick = { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }) {
+                        Text("اجازهٔ نمایش اعلان همگام‌سازی را بده")
+                    }
+                }
+                if ((config?.lastSyncAt ?: 0L) > 0L) {
+                    Text(
+                        "آخرین همگام‌سازی: " + Jalali.formatDateTime(config?.lastSyncAt ?: 0L),
+                        color = TextMuted,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                vm.lastSync.collectAsStateWithLifecycle().value?.let { r ->
+                    Text(r.message, color = PrimaryCyan, style = MaterialTheme.typography.labelMedium)
+                }
+
+                Spacer(Modifier.height(10.dp))
+                SwitchLine(
+                    title = "فاکتور خودکار برای کاربر جدید پنل",
+                    hint = "در نام کاربر پنل، بعد از شماره /50 بگذارید؛ ۵۰ یعنی ۵۰۰٬۰۰۰ ریال تخفیف (فقط فاکتور اولیه)",
+                    checked = settings.autoInvoiceOnNewAccount,
+                    onChange = { v -> vm.updateSettings { it.copy(autoInvoiceOnNewAccount = v) } }
+                )
+                Text(
+                    "پس از همگام‌سازی، با ریست حجم یا شروع دوبارهٔ دورهٔ زمانی، فاکتور تمدید خودکار صادر می‌شود.",
+                    color = PrimaryCyan,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                SwitchLine(
+                    title = "ارسال فوری پیامک فاکتور",
+                    hint = "بلافاصله پس از صدور، به شمارهٔ ثبت‌شدهٔ مشتری",
+                    checked = settings.autoSmsOnInvoice,
+                    onChange = { v -> vm.updateSettings { it.copy(autoSmsOnInvoice = v) } }
+                )
+                SwitchLine(
+                    title = "ساخت خودکار مشتری از نام کاربر پنل",
+                    hint = "اگر مشتری متناظر پیدا نشد",
+                    checked = settings.autoCreateCustomerFromPanel,
+                    onChange = { v -> vm.updateSettings { it.copy(autoCreateCustomerFromPanel = v) } }
+                )
+
+                Spacer(Modifier.height(10.dp))
+                LabeledField(
+                    "شمارهٔ کارت برای درج در فاکتور",
+                    cardNumber,
+                    { cardNumber = it },
+                    placeholder = "6037-9977-1234-5678"
+                )
+                Spacer(Modifier.height(8.dp))
+                AmountField(
+                    "قیمت هر گیگ (ریال) — برای بسته‌های بدون قیمت",
+                    pricePerGb,
+                    { pricePerGb = it }
+                )
+                Text(
+                    "اگر حجم/روز اکانت با هیچ بسته‌ای در صفحهٔ «بسته‌ها» نخواند، فاکتور با این نرخ ساخته می‌شود. صفر = غیرفعال.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            vm.updateSettings {
+                                it.copy(
+                                    paymentCardNumber = cardNumber.trim(),
+                                    pricePerGbRial = pricePerGb
+                                )
+                            }
+                            vm.report("تنظیمات فاکتور خودکار ذخیره شد")
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("ذخیره") }
+                    OutlinedButton(onClick = { vm.syncPanel() }, modifier = Modifier.weight(1f)) {
+                        Text("همگام‌سازی الان")
+                    }
+                }
+            }
+
+            SectionCard(title = "پیامک", visible = tab == SettingsTab.SMS.ordinal) {
+                DropdownField(
+                    label = "روش ارسال",
+                    items = listOf(SmsMode.GATEWAY, SmsMode.SIM),
+                    selected = settings.smsMode,
+                    itemLabel = { if (it == SmsMode.SIM) "سیم‌کارت گوشی (رایگان)" else "درگاه پیامکی (با گزارش تحویل)" },
+                    onSelect = { mode ->
+                        if (mode == SmsMode.SIM && ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                            sendSmsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
+                        } else vm.updateSettings { it.copy(smsMode = mode) }
+                    }
+                )
+                if (settings.smsMode == SmsMode.SIM &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("برای ارسال فاکتور و رسید واریزی از سیم‌کارت، مجوز ارسال پیامک را فعال کنید.", color = TextMuted)
+                    OutlinedButton(
+                        onClick = { sendSmsPermissionLauncher.launch(Manifest.permission.SEND_SMS) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("درخواست مجوز ارسال پیامک") }
+                }
+                if (settings.smsMode == SmsMode.GATEWAY) {
+                    Spacer(Modifier.height(8.dp))
+                    DropdownField(
+                        label = "درگاه",
+                        items = listOf(SmsGatewayProvider.KAVENEGAR, SmsGatewayProvider.SMS_IR),
+                        selected = settings.gatewayProvider,
+                        itemLabel = { SmsGatewayProvider.label(it) },
+                        onSelect = { p -> vm.updateSettings { it.copy(gatewayProvider = p) } }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LabeledField("کلید API درگاه", gatewayKey, { gatewayKey = it })
+                    Spacer(Modifier.height(8.dp))
+                    LabeledField("شمارهٔ خط/فرستنده", gatewaySender, { gatewaySender = it })
+                }
+                Spacer(Modifier.height(8.dp))
+                SwitchLine(
+                    title = "ارسال پیامک رسید واریزی",
+                    hint = "پس از ثبت هر پرداخت، مبلغ و ماندهٔ به‌روز حساب برای مشتری ارسال می‌شود",
+                    checked = settings.autoSmsOnPayment,
+                    onChange = { enabled -> vm.updateSettings { it.copy(autoSmsOnPayment = enabled) } }
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "پیامک فاکتور با نام مشتری شروع می‌شود؛ نام فروشگاه و لینک اشتراک در آن درج نمی‌شود.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                LabeledField(
+                    "قالب پیامک فاکتور",
+                    template,
+                    { template = it },
+                    singleLine = false,
+                    maxLines = 12
+                )
+                Text(
+                    "متغیرها: {customer} {invoiceNo} {datetime} {date} {package} {kind} " +
+                        "{items} {subtotal} {discount} {net} {total} {prevBalance} {totalDebt} {debt} {card} {footer}",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                // پیش‌نمایش با همان متنی که الان در کادر است (قبل از ذخیره هم دیده می‌شود)
+                Text("پیش‌نمایش پیامک:", style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(4.dp))
+                androidx.compose.material3.Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        ir.cmbtools.ledger.sms.SmsTemplate.preview(settings, template, footer),
+                        modifier = Modifier.padding(10.dp),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                TextButton(
+                    onClick = {
+                        template = AppSettings.DEFAULT_INVOICE_TEMPLATE
+                        vm.updateSettings { it.copy(invoiceTemplate = AppSettings.DEFAULT_INVOICE_TEMPLATE) }
+                        vm.report("قالب پیامک به حالت پیش‌فرض (ساختاریافته) بازگشت")
+                    }
+                ) { Text("بازگردانی قالب پیش‌فرض") }
+                Spacer(Modifier.height(8.dp))
+                LabeledField("امضای پیامک ({footer})", footer, { footer = it })
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        vm.updateSettings {
+                            it.copy(
+                                gatewayApiKey = gatewayKey,
+                                gatewaySender = gatewaySender,
+                                invoiceTemplate = template,
+                                invoiceFooter = footer
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("ذخیرهٔ تنظیمات پیامک") }
+            }
+
+            SectionCard(title = "فرمان و گزارش پیامکی خصوصی", visible = tab == SettingsTab.SMS.ordinal) {
+                LabeledField(
+                    "شمارهٔ یگانهٔ فرمان و گزارش",
+                    renewalCommandSender,
+                    { renewalCommandSender = it },
+                    keyboardType = KeyboardType.Phone
+                )
+                Text(
+                    "فرمان‌ها فقط از این شماره پذیرفته می‌شوند و گزارش ساخت کاربر، تمدید، واریزی و مانده فقط به همین شماره ارسال می‌شود. شمارهٔ خالی همهٔ این فرمان‌ها و گزارش‌ها را خاموش می‌کند.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "ایجاد\nنام دقیق مشتری\n۰۹۱۲۱۲۳۴۵۶۷\n۵۰\n۳۰۰\n\nتمدید\nنام دقیق مشتری\n۵۰\n۳۰۰\n\nواریز\nنام دقیق مشتری\n۳۰۰\n\nمانده\nنام دقیق مشتری",
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "در فرمان ایجاد، نام و شمارهٔ موبایل باید با مشتری ثبت‌شده در اپ مطابقت داشته باشد؛ خط چهارم حجم و خط پنجم تخفیف است. در فرمان تمدید، خط سوم حجم و خط چهارم تخفیف است. تخفیف در ۱۰٬۰۰۰ ضرب می‌شود (۳۰۰ = ۳٬۰۰۰٬۰۰۰ ریال) و در فاکتور اعمال می‌شود؛ حجم باید با بستهٔ فعال یکتا تطبیق کند. مدت تمدید همان بستهٔ فعلی اکانت است. عدد فرمان واریز هم در ۱۰٬۰۰۰ ضرب می‌شود، اما فقط ثبت دستی است و تأیید بانکی نیست. نام مشتری در همهٔ فرمان‌ها باید دقیق باشد.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Text(
+                    "نمونهٔ گزارش ساخت:\nکاربر جدید\nنام مشتری\nبسته\n\nنمونهٔ گزارش تمدید:\nتمدید اشتراک\nنام مشتری\nبسته\n\nثبت شد\nنام مشتری\n۳٬۰۰۰٬۰۰۰ ریال\nمانده: ۱٬۰۰۰٬۰۰۰ ریال\n\nمانده حساب\nنام مشتری\nمانده: ۱٬۰۰۰٬۰۰۰ ریال",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED) {
+                    OutlinedButton(
+                        onClick = { receiveSmsPermissionLauncher.launch(Manifest.permission.RECEIVE_SMS) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("درخواست مجوز دریافت پیامک") }
+                }
+                Button(
+                    onClick = {
+                        if (renewalCommandSender.isNotBlank() &&
+                            !ir.cmbtools.ledger.sms.SmsSender.isValidIranMobile(renewalCommandSender)
+                        ) {
+                            vm.report("برای فرمان و گزارش دوطرفه، یک شمارهٔ موبایل معتبر ایران وارد کنید", isError = true)
+                        } else {
+                            vm.updateSettings { it.copy(renewalCommandSender = renewalCommandSender.trim()) }
+                            vm.report(if (renewalCommandSender.isBlank()) "فرمان‌ها و گزارش‌های خصوصی پیامکی غیرفعال شد" else "شمارهٔ فرمان و مقصد گزارش پیامکی ذخیره شد")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("ذخیرهٔ شمارهٔ فرمان و گزارش") }
+                Text(
+                    "فرستندهٔ پیامک قابل جعل است؛ فقط از شماره‌ای استفاده کنید که در اختیار خودتان است و فرستنده را راز یا تأیید مستقل بانکی فرض نکنید.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+
+            SectionCard(title = "پیامک بانکی", visible = tab == SettingsTab.SMS.ordinal) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("تطبیق خودکار پرداخت")
+                    Switch(
+                        checked = settings.autoMatchBankSms,
+                        onCheckedChange = { value -> vm.updateSettings { it.copy(autoMatchBankSms = value) } }
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                AmountField("حداکثر مبلغ برای تطبیق خودکار", autoMatchMax, { autoMatchMax = it })
+                Text(
+                    "مبالغ بالاتر از این مقدار فقط با تأیید شما ثبت می‌شوند.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { vm.updateSettings { it.copy(autoMatchMaxRial = autoMatchMax) } },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("ذخیره") }
+            }
+
+            SectionCard(title = "کسب‌وکار و بسته‌ها", visible = tab == SettingsTab.BUSINESS.ordinal) {
+                LabeledField("نام کسب‌وکار (عنوان داشبورد و صفحهٔ قفل)", businessName, { businessName = it })
+                Text(
+                    "این نام در پیامک فاکتور درج نمی‌شود؛ پیامک با نام مشتری شروع می‌شود.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { vm.updateSettings { it.copy(businessName = businessName) } },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("ذخیره") }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { nav.navigate("plans") }, modifier = Modifier.weight(1f)) {
+                        Text("بسته‌ها")
+                    }
+                    OutlinedButton(onClick = { nav.navigate("expenses") }, modifier = Modifier.weight(1f)) {
+                        Text("هزینه‌ها")
+                    }
+                }
+            }
+
+            SectionCard(title = "امنیت", visible = tab == SettingsTab.SECURITY.ordinal) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("قفل اپ با رمز")
+                        Text(
+                            "داده‌های مالی و کلید API روی دستگاه رمزنگاری‌شده‌اند",
+                            color = TextMuted,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    Switch(
+                        checked = settings.lockEnabled,
+                        onCheckedChange = { on ->
+                            if (on && settings.lockPin.isBlank()) {
+                                vm.updateSettings { it.copy(lockEnabled = true) }
+                            } else {
+                                vm.updateSettings { it.copy(lockEnabled = on) }
+                            }
+                        }
+                    )
+                }
+                if (settings.lockEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    LabeledField(
+                        if (settings.lockPin.isBlank()) "تعیین رمز (۴ رقم)" else "تغییر رمز (۴ رقم)",
+                        pin,
+                        { pin = it.filter { ch -> ch.isDigit() }.take(4) },
+                        keyboardType = KeyboardType.NumberPassword
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { vm.updateSettings { it.copy(lockPin = pin) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = pin.length == 4
+                    ) { Text("ذخیرهٔ رمز") }
+                }
+            }
+
+            SectionCard(title = "پشتیبان‌گیری و بازیابی", visible = tab == SettingsTab.BACKUP.ordinal) {
+                Text(
+                    "فایل پشتیبان کامل JSON شامل همهٔ این داده‌ها و تنظیمات است:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(6.dp))
+                listOf(
+                    "مشتریان، بسته‌ها، فاکتورها و اقلام فاکتور",
+                    "پرداخت‌ها، ثبت‌های دفتر، هزینه‌ها",
+                    "تنظیمات اتصال پنل هیدی‌فای (دامنه، مسیر پروکسی، کلید API)",
+                    "اکانت‌های همگام‌شدهٔ پنل",
+                    "همهٔ تنظیمات برنامه: پیامک، قالب فاکتور، نام کسب‌وکار، شمارهٔ کارت، رقم‌بندی، همگام‌سازی خودکار، رمز قفل",
+                    "پیامک‌های بانکی و تاریخچهٔ پیامک‌های ارسالی"
+                ).forEach { line ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+                        Text("• ", color = PrimaryCyan, style = MaterialTheme.typography.bodyMedium)
+                        Text(line, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "بکاپ خودکار تقریباً هر ۲۴ ساعت، با اتصال اینترنت در پس‌زمینه اجرا می‌شود (اندروید ممکن است کمی تأخیر بدهد). در پنجرهٔ انتخاب پوشه، Google Drive را باز کنید؛ اگر نمایش داده نمی‌شود، برنامهٔ Drive باید نصب و به حساب شما وارد شده باشد.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                OutlinedButton(
+                    onClick = { driveFolderPicker.launch(null) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (driveBackupFolder == null) "انتخاب پوشهٔ Google Drive" else "تغییر پوشهٔ Google Drive") }
+                Text(
+                    if (driveBackupFolder == null) "پوشه‌ای انتخاب نشده است"
+                    else "مقصد بکاپ: پوشهٔ انتخاب‌شده در فضای ابری",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("بکاپ خودکار روزانه", style = MaterialTheme.typography.bodyMedium)
+                    Switch(
+                        checked = driveBackupEnabled,
+                        enabled = driveBackupFolder != null,
+                        onCheckedChange = { enabled ->
+                            if (enabled) {
+                                val selected = driveBackupFolder?.let(Uri::parse)
+                                val hasPermission = selected != null && context.contentResolver.persistedUriPermissions
+                                    .any { it.uri == selected && it.isWritePermission }
+                                if (!hasPermission) {
+                                    vm.report("مجوز پوشه از دست رفته است؛ پوشهٔ Google Drive را دوباره انتخاب کنید", isError = true)
+                                    driveBackupEnabled = false
+                                } else {
+                                    driveBackupPrefs.setDriveBackupEnabled(true)
+                                    driveBackupEnabled = true
+                                    DriveBackupWorker.enable(context)
+                                    vm.report("بکاپ خودکار فعال شد؛ اولین تلاش با اتصال اینترنت انجام می‌شود")
+                                }
+                            } else {
+                                driveBackupPrefs.setDriveBackupEnabled(false)
+                                driveBackupEnabled = false
+                                DriveBackupWorker.disable(context)
+                                vm.report("بکاپ خودکار متوقف شد؛ فایل‌های قبلی در Drive باقی می‌مانند")
+                            }
+                        }
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        DriveBackupWorker.backupNow(context)
+                        vm.report("درخواست بکاپ ثبت شد؛ نتیجه پس از پایان بارگذاری نمایش داده می‌شود")
+                    },
+                    enabled = driveBackupFolder != null,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("پشتیبان‌گیری در Drive همین حالا") }
+                if (driveBackupLastSuccess > 0L) {
+                    Text(
+                        "آخرین بکاپ موفق: " + DateFormat.getDateTimeInstance(
+                            DateFormat.SHORT, DateFormat.SHORT, Locale("fa", "IR")
+                        ).format(Date(driveBackupLastSuccess)),
+                        color = AccentGreen,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                driveBackupLastError?.let { error ->
+                    Text(
+                        "آخرین تلاش ناموفق بود: $error",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                Text(
+                    "فایل پشتیبان JSON و شامل اطلاعات مشتری و تنظیمات محرمانهٔ پنل است؛ فقط یک پوشهٔ خصوصی در Drive انتخاب کنید و آن را با دیگران به‌اشتراک نگذارید. تا ۳۰ نسخهٔ خودکار نگه داشته می‌شود.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = { saveBackupLauncher.launch("tiznet-backup.json") },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("ذخیرهٔ فایل پشتیبان در دستگاه") }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        ExportManager(context, vm.appContainer()).exportBackup { r ->
+                            r.onSuccess { vm.report("پشتیبان کامل آمادهٔ اشتراک‌گذاری است: " + it.name) }
+                                .onFailure { vm.report("ساخت پشتیبان ناموفق: ${it.message}", isError = true) }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("اشتراک‌گذاری فایل پشتیبان (JSON)") }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("بازیابی از فایل پشتیبان") }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "بازیابی، داده‌های فعلی را با محتوای فایل جایگزین می‌کند (قبلش یک پشتیبان تازه بگیرید). برای بازیابی نسخهٔ خودکار، دکمهٔ بازیابی را بزنید و فایل را از پوشهٔ Google Drive انتخاب کنید. " +
+                        "فایل شامل اطلاعات مشتری و تنظیمات محرمانهٔ پنل است؛ آن را فقط در فضای شخصی نگه دارید و عمومی به‌اشتراک نگذارید.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+
+            SectionCard(title = "درباره", visible = tab == SettingsTab.ABOUT.ordinal) {
+                Text(
+                    "تیزنت — نسخهٔ " + Money.toPersian(BuildConfig.VERSION_NAME),
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "شمارهٔ ساخت: " + Money.toPersian(BuildConfig.VERSION_CODE.toString()) +
+                        "  •  اندروید " + Money.toPersian(android.os.Build.VERSION.RELEASE ?: ""),
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Text(
+                    "اپ شخصی حسابداری + مدیریت پنل هیدی‌فای ۱۱ تا ۱۴. ساخته‌شده برای استفادهٔ تک‌کاربره روی گوشی خودتان.",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://hiddify.com"))
+                    context.startActivity(intent)
+                }) { Text("مستندات هیدی‌فای", color = AccentGreen) }
+            }
+
+            Spacer(Modifier.height(30.dp))
+        }
+    }
+}
+
+/** سوییچ با عنوان و توضیح فارسی (در این صفحه چند بار لازم است) */
+@Composable
+private fun SwitchLine(
+    title: String,
+    hint: String? = null,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            if (hint != null) Text(hint, color = TextMuted, style = MaterialTheme.typography.labelMedium)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+
+/**
+ * یک خط «برچسب + آدرس» برای نمایش آدرس‌های دقیق پنل.
+ * آدرس‌ها لاتین‌اند و جدا از برچسب فارسی نمایش داده می‌شوند تا قاطی نشوند.
+ */
+@Composable
+private fun EndpointLine(label: String, value: String) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(label, color = TextMuted, style = MaterialTheme.typography.labelMedium)
+        Text(value, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+
+/**
+ * سربرگ‌های صفحهٔ تنظیمات.
+ *
+ * هر گروه تنظیمات یک سربرگ جداگانه دارد تا کاربر لازم نباشد برای رسیدن به
+ * «پیامک» از وسط «پنل» عبور کند. ترتیب `ordinal` با `when`/`if`های بالا یکی است،
+ * پس اگر سربرگی جابه‌جا شد فقط همین لیست را تغییر دهید.
+ */
+private enum class SettingsTab(val title: String) {
+    PANEL("پنل هیدی‌فای"),
+    SYNC("همگام‌سازی و فاکتور"),
+    SMS("پیامک"),
+    BUSINESS("کسب‌وکار"),
+    SECURITY("امنیت"),
+    BACKUP("پشتیبان"),
+    ABOUT("درباره")
+}
