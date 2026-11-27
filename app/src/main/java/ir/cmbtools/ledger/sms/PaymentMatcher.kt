@@ -81,7 +81,13 @@ class PaymentMatcher(
         if (!tooLarge) {
             // قاعدهٔ ۳/۴: تطبیق قطعی بر اساس ۴ رقم کارت یا فاکتور همان مبلغ برای همان مشتری
             if (parsed.last4.isNotBlank()) {
-                val customer = findCustomerByLast4(parsed.last4)
+                val customers = customerDao.byLast4(parsed.last4)
+                if (cardMatchIsAmbiguous(customers.size)) {
+                    val reason = "چهار رقم کارت برای چند مشتری ثبت شده است؛ تأیید دستی لازم است"
+                    bankSmsDao.insert(base.copy(note = reason))
+                    return Result.NeedsReview(reason, amount)
+                }
+                val customer = customers.singleOrNull()
                 if (customer != null) {
                     val open = invoiceDao.openInvoicesOldestFirst(customer.id)
                         .filter { it.remainingRial == amount }
@@ -164,9 +170,6 @@ class PaymentMatcher(
             receiptSms = receipt
         )
     }
-
-    private suspend fun findCustomerByLast4(last4: String) =
-        customerDao.byLast4(last4)
 
     private fun sha256(value: String): String {
         val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())

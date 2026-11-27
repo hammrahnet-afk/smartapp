@@ -25,8 +25,9 @@ interface CustomerDao {
     @Query("SELECT * FROM customers")
     suspend fun all(): List<Customer>
 
-    @Query("SELECT * FROM customers WHERE cardLast4 = :last4 AND archived = 0 LIMIT 1")
-    suspend fun byLast4(last4: String): Customer?
+    // Two rows are enough to establish that the card suffix is ambiguous.
+    @Query("SELECT * FROM customers WHERE cardLast4 = :last4 AND archived = 0 LIMIT 2")
+    suspend fun byLast4(last4: String): List<Customer>
 
     @Query("SELECT * FROM customers WHERE name = :name AND archived = 0 LIMIT 1")
     suspend fun byName(name: String): Customer?
