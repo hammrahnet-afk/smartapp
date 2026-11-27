@@ -1,0 +1,91 @@
+package ir.cmbtools.ledger
+
+import android.content.Context
+import ir.cmbtools.ledger.billing.AutoBilling
+import ir.cmbtools.ledger.core.Prefs
+import ir.cmbtools.ledger.data.AppDatabase
+import ir.cmbtools.ledger.data.CustomerRepository
+import ir.cmbtools.ledger.data.InvoiceRepository
+import ir.cmbtools.ledger.data.PaymentRepository
+import ir.cmbtools.ledger.data.ReportingRepository
+import ir.cmbtools.ledger.panel.PanelClient
+import ir.cmbtools.ledger.panel.PanelService
+import ir.cmbtools.ledger.sms.AdminSmsCommandProcessor
+import ir.cmbtools.ledger.sms.CreateAccountSmsCommandProcessor
+import ir.cmbtools.ledger.sms.PaymentMatcher
+import ir.cmbtools.ledger.sms.PaymentReceiptNotifier
+import ir.cmbtools.ledger.sms.RenewalSmsCommandProcessor
+import ir.cmbtools.ledger.sms.SmsSender
+import ir.cmbtools.ledger.sync.SyncEngine
+
+/**
+ * وابستگی‌ها به‌صورت دستی ساخته می‌شوند (بدون Hilt) تا پروژه سبک و قابل فهم بماند.
+ */
+class AppContainer(context: Context) {
+
+    private val appContext = context.applicationContext
+
+    val db: AppDatabase = AppDatabase.build(appContext)
+    val prefs = Prefs(appContext)
+
+    private val customersDao = db.customers()
+    private val plansDao = db.plans()
+    private val invoicesDao = db.invoices()
+    private val paymentsDao = db.payments()
+    private val ledgerDao = db.ledger()
+    private val expensesDao = db.expenses()
+    private val panelDao = db.panel()
+    private val bankSmsDao = db.bankSms()
+    private val outboxDao = db.smsOutbox()
+    private val invoiceNumberCounterDao = db.invoiceNumberCounter()
+
+    val customers = CustomerRepository(customersDao, ledgerDao, invoicesDao)
+    val invoices = InvoiceRepository(invoicesDao, ledgerDao, paymentsDao, invoiceNumberCounterDao, db)
+    val payments = PaymentRepository(paymentsDao, invoicesDao, invoices, ledgerDao)
+    val reports = ReportingRepository(invoicesDao, paymentsDao, expensesDao, ledgerDao, customersDao, panelDao, bankSmsDao)
+
+    val panelClient = PanelClient(panelDao, prefs)
+    val panelService = PanelService(panelClient, panelDao, customersDao, prefs)
+    val smsSender = SmsSender(appContext, outboxDao)
+    val paymentReceiptNotifier = PaymentReceiptNotifier(customersDao, ledgerDao, prefs, smsSender)
+    val matcher = PaymentMatcher(bankSmsDao, customersDao, invoicesDao, payments, prefs, paymentReceiptNotifier)
+    val seed = SeedData(customersDao, plansDao, panelDao)
+
+    /** موتور صورت‌حساب خودکار (فاکتور + پیامک) — مشترک بین UI و همگام‌سازی پس‌زمینه */
+    val billing = AutoBilling(invoices, customersDao, plansDao, smsSender, prefs)
+    val renewalSmsCommandProcessor = RenewalSmsCommandProcessor(prefs, panelDao, panelService, billing)
+    val createAccountSmsCommandProcessor = CreateAccountSmsCommandProcessor(
+        prefs = prefs,
+        customers = customersDao,
+        invoices = invoices,
+        panelService = panelService,
+        billing = billing
+    )
+    val adminSmsCommandProcessor = AdminSmsCommandProcessor(
+        prefs = prefs,
+        db = db,
+        bankSmsDao = bankSmsDao,
+        customerDao = customersDao,
+        ledgerDao = ledgerDao,
+        billing = billing,
+        payments = payments,
+        smsSender = smsSender,
+        paymentReceiptNotifier = paymentReceiptNotifier,
+        renewalProcessor = renewalSmsCommandProcessor,
+        createProcessor = createAccountSmsCommandProcessor
+    )
+
+    /** همگام‌سازی هوشمند پنل: کاربر جدید/تمدید → فاکتور خودکار */
+    val syncEngine = SyncEngine(panelClient, panelService, panelDao, customersDao, billing, prefs)
+
+    fun plans() = plansDao
+    fun expensesDao() = expensesDao
+    fun panelDao2() = panelDao
+    fun bankSmsDao2() = bankSmsDao
+    fun outboxDao2() = outboxDao
+    fun invoicesDao() = invoicesDao
+    fun paymentsDao() = paymentsDao
+    fun ledgerDao() = ledgerDao
+    fun customersDao() = customersDao
+    fun backupDao() = db.backup()
+}
